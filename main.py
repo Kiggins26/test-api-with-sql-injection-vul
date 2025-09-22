@@ -37,7 +37,7 @@ def startup_populate():
     conn.commit()
     conn.close()
 
-
+#this is unsafe
 @app.get("/get_stuff")
 def get_stuff(num_of_rows: str = "5"):
 
