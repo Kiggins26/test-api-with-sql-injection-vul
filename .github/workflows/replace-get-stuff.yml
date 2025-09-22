@@ -1,69 +1,103 @@
-from fastapi import FastAPI, HTTPException, Query
-import sqlite3
-from typing import List
-import os
+name: Replace get_stuff endpoint
 
-DB_FILE = "stuff.db"
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
-app = FastAPI()
+permissions:
+  contents: write
+  pull-requests: write
 
-# Ensure DB setup
-@app.on_event("startup")
-def startup_populate():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
 
-    # Create table and populate in one executescript
-    cursor.executescript("""
-        CREATE TABLE IF NOT EXISTS stuff (
-            public_id TEXT PRIMARY KEY,
-            secret_codes TEXT
-        );
-    """)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # Check if empty and populate
-    cursor.execute("SELECT COUNT(*) FROM stuff")
-    count = cursor.fetchone()[0]
+      - name: Replace get_stuff endpoint in-place
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="app/main.py"
 
-    if count == 0:
-        script = """
-        BEGIN TRANSACTION;
-        """
-        for i in range(1, 51):
-            script += f"INSERT INTO stuff (public_id, secret_codes) VALUES ('pub_{i}', 'secret_{i}');\n"
-        script += "COMMIT;"
-        cursor.executescript(script)
-
-    conn.commit()
-    conn.close()
-
-
+          # Create the replacement snippet in a temp file
+          cat > get_stuff_snippet.py <<'EOF'
 @app.get("/get_stuff")
-def get_stuff(num_of_rows: str = "5"):
-
-    sql_query = f"SELECT public_id  FROM stuff LIMIT {num_of_rows};"
-
+def get_stuff(num_of_rows: int = Query(5, ge=1, le=50)):
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT public_id FROM stuff LIMIT ?", (num_of_rows,))
+            rows = cursor.fetchall()
 
-        results = []
-
-        # executescript can run multiple statements, capture results if possible
-        for i, statement in enumerate(sql_query.split(";")):
-            stmt = statement.strip()
-            if stmt.upper().startswith("SELECT"):
-                cursor.execute(stmt)
-                rows = cursor.fetchall()
-
-                for row in rows:
-                    results.append(str(row))
-                results.append("")  # spacing
-
-        conn.commit()
-        conn.close()
-        return "\n".join(results)
-
+        results = [row[0] for row in rows]
+        return {"public_ids": results}
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid query: {e}")
+        raise HTTPException(status_code=400, detail=f"Error: {e}")
+EOF
+
+          # If the decorator exists, replace the block starting at the decorator
+          if grep -q '^@app.get("/get_stuff")' "$file"; then
+            awk -v sfile="get_stuff_snippet.py" '
+              BEGIN { in=0 }
+              /^@app.get\("\/get_stuff"\)/ {
+                in=1;
+                # print snippet file content
+                while((getline line < sfile) > 0) print line;
+                next
+              }
+              in==1 {
+                if(/^@/ || /^def /) { in=0; print; }
+                else next
+              }
+              { print }
+            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+          else
+            # If not present, append the snippet to the end of the file
+            echo "" >> "$file"
+            cat get_stuff_snippet.py >> "$file"
+          fi
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create branch, commit and push (only if changes)
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="app/main.py"
+          branch="refactor/replace-get-stuff-endpoint"
+
+          git fetch origin main:main || true
+          git checkout -B "$branch"
+
+          git add "$file" || true
+
+          if git diff --cached --quiet; then
+            echo "No changes detected in $file. Exiting without creating a PR."
+            exit 0
+          fi
+
+          git commit -m "Refactor: replace get_stuff endpoint with safer version"
+          git push -u origin "$branch" --force
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: refactor/replace-get-stuff-endpoint
+          title: "Refactor: Replace get_stuff endpoint"
+          body: |
+            This PR replaces the `get_stuff` endpoint with a safer version that:
+            - Uses `Query` validation (`int`, min=1, max=50).
+            - Avoids raw SQL injection by using parameterized queries.
+            - Returns structured JSON instead of a raw string.
+
