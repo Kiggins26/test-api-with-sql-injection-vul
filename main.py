@@ -37,32 +37,20 @@ def startup_populate():
     conn.commit()
     conn.close()
 
-#this is unsafe
 @app.get("/get_stuff")
-def get_stuff(num_of_rows: str = "5"):
-
-    sql_query = f"SELECT public_id  FROM stuff LIMIT {num_of_rows};"
-
+def get_stuff(num_of_rows: int = Query(5, ge=1, le=50)):
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT public_id FROM stuff LIMIT ?", (num_of_rows,))
+            rows = cursor.fetchall()
 
-        results = []
+        results = [row[0] for row in rows]
+        return {"public_ids": results}
 
-        # executescript can run multiple statements, capture results if possible
-        for i, statement in enumerate(sql_query.split(";")):
-            stmt = statement.strip()
-            if stmt.upper().startswith("SELECT"):
-                cursor.execute(stmt)
-                rows = cursor.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error: {e}")
 
-                for row in rows:
-                    results.append(str(row))
-                results.append("")  # spacing
-    
-        conn.commit()
-        conn.close()
-        return "\n".join(results)
 
 
     except Exception as e:
